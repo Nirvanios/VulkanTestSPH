@@ -1,0 +1,201 @@
+#version 450
+
+struct ParticleRecord {
+    vec4 position;
+    vec4 color;
+    vec4 velocity;
+    float mass;
+    float density;
+    float pressure;
+    float particleRadius;
+};
+
+layout(std430, binding = 0) buffer positionBuffer{
+    ParticleRecord particleRecords[];
+};
+
+layout(std430, binding = 1) buffer floorBuffer{
+    ParticleRecord floorRecords[];
+};
+
+layout (local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+uint numOfParticles = gl_NumWorkGroups.x;
+
+const float pi = 3.1415927410125732421875f;
+const float fluidDensity = 998.29;
+const float smooothingLength = 0.1;
+
+const float stiffnes = 3.0;
+
+const float viscosity = 200;
+const vec3 gravity = vec3(0, -9.82, 0);
+
+const float timeStep = 0.001f;
+const float wallDumping = 0.3f;
+
+const float defaultKernelStaticPart = 315 / (64 * pi * pow(smooothingLength, 9));
+const float defaultKernelGradientStaticPart = -945 / (32 * pi * pow(smooothingLength, 9));
+const float spikyKernelStaticPart = 15 / (pi * pow(smooothingLength, 6));
+const float spikyKernelGradientStaticPart = -45 / (pi * pow(smooothingLength, 6));
+const float spikyKernelLaplacianStaticPart = -90 / (pi * pow(smooothingLength, 6));
+const float viscosityKernelStaticPart = 15 / (2 * pi * pow(smooothingLength, 3));
+const float viscosityKernelLaplacianStaticPart = -spikyKernelGradientStaticPart;
+
+float cbrt(float n){
+    return pow(n, (1.0/3.0));
+}
+
+float defaultKernel(float distance){
+    if (distance >= 0 && distance <= smooothingLength){
+        return defaultKernelStaticPart * pow(pow(smooothingLength, 2) - pow(distance, 2), 3);
+    }
+    else {
+        return 0.0;
+    }
+}
+
+vec3 defaultKernelGradient(float distance, vec3 deltaParticles){
+    return defaultKernelGradientStaticPart * deltaParticles * pow(pow(smooothingLength, 2) - pow(distance, 2), 2);
+}
+
+float defaultKernelLaplacian(float distance){
+    return defaultKernelGradientStaticPart * pow(pow(smooothingLength, 2) - pow(distance, 2), 2) * (3 * pow(smooothingLength, 2) - 7 * pow(distance, 2));
+}
+
+float spikyKernel(float distance){
+    if (distance >= 0 && distance <= smooothingLength){
+        return spikyKernelStaticPart * pow(smooothingLength - distance, 3);
+    }
+    else {
+        return 0.0;
+    }
+}
+
+vec3 spikyKernelGradient(float distance, vec3 deltaParticles){
+    return spikyKernelGradientStaticPart * (deltaParticles / distance) * pow(smooothingLength - distance, 2);
+}
+
+float spikyKernelLaplacian(float distance){
+    return spikyKernelLaplacianStaticPart * (1 / distance) * (smooothingLength - distance) * (smooothingLength - 2 * distance);
+}
+
+float viscosityKernel(float distance){
+    if (distance > 0 && distance <= smooothingLength){
+        return viscosityKernelStaticPart * (-pow(distance, 3) / (2 * pow(smooothingLength, 3)) + pow(distance, 2) / pow(smooothingLength, 2) + smooothingLength / (2 * distance) - 1);
+    }
+    else {
+        return 0.0;
+    }
+}
+
+vec3 viscosityKernelGradient(float distance, vec3 deltaParticles){
+    return viscosityKernelStaticPart * deltaParticles * (-distance * 3 / (2 * pow(smooothingLength, 3)) + 2 / pow(smooothingLength, 2) - smooothingLength / (2 * pow(distance, 3)));
+}
+
+float viscosityKernelLaplacian(float distance){
+    return viscosityKernelLaplacianStaticPart * (smooothingLength - distance);
+}
+
+void main()
+{
+    uint myID = gl_GlobalInvocationID.x;
+    if (myID < numOfParticles){
+        /*Mass-density aproximation*/
+        float localDensity = 0.0;
+        for (int j = 0; j < numOfParticles; j++){
+            float distance = distance(particleRecords[myID].position.xyz, particleRecords[j].position.xyz);
+            if (myID != j){
+                localDensity += particleRecords[j].mass * defaultKernel(distance);
+            }
+        }
+
+        //localDensity /= 3.0;
+        particleRecords[myID].density = localDensity;
+
+        /*Compute pressure from density and wait for all threads*/
+        particleRecords[myID].pressure = stiffnes * (localDensity - fluidDensity);
+        barrier();
+
+        /*Pressure and viscosity force aproximation*/
+        vec3 pressureForce = vec3(0, 0, 0);
+        vec3 viscosityForce = vec3(0, 0, 0);
+
+        for (uint j = 0; j < numOfParticles; j++){
+            if (myID == j){
+                continue;
+            }
+            float distance = distance(particleRecords[myID].position.xyz, particleRecords[j].position.xyz);
+            vec3 deltaParticles = particleRecords[myID].position.xyz - particleRecords[j].position.xyz;
+            if (distance < smooothingLength){
+                pressureForce -= particleRecords[j].mass *
+                                (particleRecords[myID].pressure + particleRecords[j].pressure) / (2.f * particleRecords[j].density) *
+                                spikyKernelGradient(distance, deltaParticles);
+
+                viscosityForce += particleRecords[j].mass *
+                                (particleRecords[j].velocity.xyz - particleRecords[myID].velocity.xyz) / particleRecords[j].density *
+                                viscosityKernelLaplacian(distance);
+
+
+            }
+        }
+        viscosityForce *= viscosity;
+
+        /*Sum forces of particle and wait for all threads*/
+        vec3 externalForce = localDensity * gravity;
+        vec3 interalForce = pressureForce + viscosityForce;
+
+        vec3 force = interalForce + externalForce;
+
+        barrier();
+
+        /*Integrate - compute new position and velocity*/
+        vec3 acceleration = force / particleRecords[myID].density;
+/*        vec3 newVelocity = particleRecords[myID].velocity.xyz + timeStep * acceleration;
+        vec3 newPosition = particleRecords[myID].position.xyz + timeStep * newVelocity;*/
+
+        vec3 newVelocity = particleRecords[myID].velocity.xyz + timeStep * acceleration;
+        vec3 newPosition = particleRecords[myID].position.xyz + newVelocity * timeStep;
+
+        newVelocity = (particleRecords[myID].velocity.xyz + newVelocity) / 2.0;
+
+        /*Simple collision*/
+        if (newPosition.y < -1)
+        {
+            newPosition.y = -1;
+            newVelocity.y *= -1 * wallDumping;
+        }
+        else if (newPosition.x < -1)
+        {
+            newPosition.x = -1;
+            newVelocity.x *= -1 * wallDumping;
+        } else if (newPosition.x > 1)
+        {
+            newPosition.x = 1;
+            newVelocity.x *= -1 * wallDumping;
+        }
+        else if (newPosition.z < -1)
+        {
+            newPosition.z = -1;
+            newVelocity.z *= -1 * wallDumping;
+        } else if (newPosition.z > 1)
+        {
+            newPosition.z = 1;
+            newVelocity.z *= -1 * wallDumping;
+        }
+
+        /*Debug*/
+        if (localDensity > 1000 && interalForce.y >= -externalForce.y){
+            particleRecords[myID].color = vec4(1.0, 0.0, 0.0, 0.0);
+        }
+        else {
+            particleRecords[myID].color = vec4(1.0);
+        }
+
+        /*Update positions and velocities*/
+        particleRecords[myID].velocity = vec4(newVelocity, 0);
+        particleRecords[myID].position = vec4(newPosition, 0);
+
+        particleRecords[myID].particleRadius = 1/*00.0 * cbrt((3 * particleRecords[myID].mass) / (4 * pi * localDensity))*/;
+    }
+}

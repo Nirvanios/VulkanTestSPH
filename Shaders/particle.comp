@@ -1,0 +1,140 @@
+#version 450
+
+struct ParticleRecord {
+    vec4 position;
+    vec4 color;
+    vec4 velocity;
+    float mass;
+    float density;
+    float pressure;
+    float dummy;
+};
+
+layout(std430, binding = 0) buffer positionBuffer{
+    ParticleRecord particleRecords[];
+};
+
+layout(std430, binding = 1) buffer floorBuffer{
+    ParticleRecord floorRecords[];
+};
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const float pi = 3.14159265359;
+const float timeStep = 1/30.0;//s
+const uint speedOfSound = 1500;// m*s^-1
+const uint waterDensity = 997;//kg*m^-3
+const vec3 gravity = vec3(0.0f, -9.80665f, 0.0f);// m*s^-2
+
+const uint stiffness = 2000;
+
+const float sigma[4] = { 0, 2/3.0, 10/(7.0*pi), 1/pi };
+
+
+float smoothingKernelSplie(vec3 positionA, vec3 positionB, float smoothingLenght){
+    float q = distance(positionA, positionB) / smoothingLenght;
+    uint dimension = 3;
+    float result = sigma[dimension] / pow(smoothingLenght, dimension);
+    if (q > 0 && q < 1){
+        result *= (1 - 1.5*pow(q, 2) + 0.75*pow(q, 3));
+    }
+    else if (q >= 1 && q < 2){
+        result *= 0.25*pow(2-q, 3);
+    }
+    else {
+        result = 0;
+    }
+    return result;
+}
+
+float smoothingKernel(vec3 positionA, vec3 positionB, float smoothingLenght){
+    float staticKerel = 315 / (64*pi*pow(smoothingLenght, 9));
+    float dst = distance(vec4(positionA, 0.0), vec4(positionB, 0.0f));
+
+    if (dst > 0 && dst <= smoothingLenght){
+        return staticKerel * pow(pow(smoothingLenght, 2) - pow(dst, 2), 3);
+    }
+    else
+        return 0.0;
+}
+
+vec3 smoothingKernelGradient(vec3 positionA, vec3 positionB, float smoothingLenght){
+    float staticKerel = 945 / (32*pi*pow(smoothingLenght, 9));
+    float dst = distance(vec4(positionA, 0.0), vec4(positionB, 0.0f));
+
+    if (dst >0 && dst <= smoothingLenght){
+        return staticKerel * pow(pow(smoothingLenght, 2) - pow(dst, 2), 2) * (positionA * positionB);
+    }
+    else
+        return vec3(0.0);
+}
+
+float smoothingKernelSplineDerivative(vec3 positionA, vec3 positionB, float smoothingLenght){
+    float q = distance(positionA, positionB) / smoothingLenght;
+    uint dimension = 3;
+    float result = sigma[dimension] / pow(smoothingLenght, dimension);
+    if (q >= 0 && q < 1){
+        result *= (-3*q + 2.25*pow(q, 2));
+    }
+    else if (q >= 1 && q < 2){
+        result *= 0.75*pow(2-q, 2);
+    }
+    else {
+        result = 0;
+    }
+    return result;
+}
+
+vec3 smoothingKernelSplineGradient3D(vec3 positionA, vec3 positionB, float smoothingLenght){
+    return smoothingKernelSplineDerivative(positionA, positionB, smoothingLenght) *
+    ((positionA - positionB) / (distance(positionA, positionB) * smoothingLenght));
+}
+
+
+void main() {
+    float smoothingLenght = 3;
+    uint myID = gl_GlobalInvocationID.x;
+    vec4 myPosition = particleRecords[myID].position;
+    uint numOfParticles = gl_NumWorkGroups.x;
+    float localDensity = 0;
+    for (int i = 0; i < numOfParticles; ++i){
+        localDensity += particleRecords[i].mass *
+        smoothingKernel(myPosition.xyz, particleRecords[i].position.xyz, smoothingLenght);
+    }
+    /*    for (int i = 0; i < 2028; ++i){
+            localDensity += floorRecords[i].mass *
+            smoothingKernel(myPosition.xyz, floorRecords[i].position.xyz, smoothingLenght);
+        }*/
+
+    particleRecords[myID].density = localDensity;
+    float localPressure = stiffness * (localDensity - waterDensity);
+    particleRecords[myID].pressure = max(localPressure, 0.0f);
+    barrier();
+
+    if(localDensity < 0.001 )
+        particleRecords[myID].color = vec4(1.f, 0.f, 1.f, 0.f);
+
+    vec3 pressureAcceleration = vec3(0.0f);
+    for (int i = 0; i < numOfParticles; ++i){
+        /*pressureAcceleration += particleRecords[i].mass *
+        (((localPressure / pow(localDensity, 2)) + (particleRecords[i].pressure / particleRecords[i].density))) *
+        smoothingKernelGradient3D(myPosition.xyz, particleRecords[i].position.xyz, smoothingLenght);*/
+        if (particleRecords[i].density != 0){
+            pressureAcceleration += ((localPressure + particleRecords[i].pressure)/2) *
+                                    (particleRecords[i].mass / particleRecords[i].density) *
+                                    smoothingKernelGradient(myPosition.xyz, particleRecords[i].position.xyz, smoothingLenght);
+        }
+    }
+    /*for (int i = 0; i < 2028; ++i){
+        pressureAcceleration += floorRecords[i].mass *
+        (((localPressure / pow(localDensity, 2)) + (localPressure / pow(localDensity, 2)))) *
+        smoothingKernelGradient3D(myPosition.xyz, floorRecords[i].position.xyz, smoothingLenght);
+    }*/
+
+    vec3 acceleration = -pressureAcceleration + gravity;
+    particleRecords[myID].position += (particleRecords[myID].velocity * timeStep);
+    barrier();
+    particleRecords[myID].velocity += (vec4(acceleration, 0.0f) * timeStep);
+
+
+}
