@@ -1,57 +1,35 @@
-cmake_minimum_required(VERSION 3.14)
-project(VulkanTest)
+cmake_minimum_required(VERSION 3.17)
 
-set(CMAKE_CXX_STANDARD 17)
+include("cmake/HunterGate.cmake")
+
+HunterGate(
+        URL "https://github.com/cpp-pm/hunter/archive/v0.23.269.tar.gz"
+        SHA1 "64024b7b95b4c86d50ae05b926814448c93a70a0"
+)
+
+
+project(VulkanApp)
+
+set(CMAKE_CXX_STANDARD 20)
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fconcepts -fconcepts-diagnostics-depth=10")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror=return-type ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -Wpedantic -Wno-unknown-pragmas")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-function")
 
 find_package(Vulkan REQUIRED)
-include_directories(${Vulkan_INCLUDE_DIRS})
-message(${Vulkan_INCLUDE_DIRS})
-set(VK_LAYER_PATH "/etc/vulkan/explicit_layer.d")
-set(LD_LIBRARY_PATH "/usr/lib")
-find_package(PkgConfig REQUIRED)
-pkg_search_module(GLFW REQUIRED glfw3)
-INCLUDE_DIRECTORIES(${GLFW_INCLUDE_DIRS})
+find_package(glfw3 CONFIG REQUIRED)
+hunter_add_package(glm)
+find_package(glm CONFIG REQUIRED)
+hunter_add_package(imgui)
+find_package(imgui CONFIG REQUIRED)
+hunter_add_package(fmt)
+find_package(fmt CONFIG REQUIRED)
+hunter_add_package(spdlog)
+find_package(spdlog CONFIG REQUIRED)
+add_compile_definitions(SPDLOG_FMT_EXTERNAL)
 
-find_package(glm REQUIRED)
-include_directories(${GLM_INCLUDE_DIRS})
-
-#add_compile_options(-O3)
-
-include_directories(Objects/Headers)
-include_directories(misc/Headres)
-include_directories(Graphics/Headers)
-include_directories(lib)
-
-FILE(GLOB ObjectsSources Objects/Source/*.cpp)
-FILE(GLOB ObjectsHeaders Objects/Headers/*.h)
-
-FILE(GLOB GraphicsSources Graphics/Source/*.cpp)
-FILE(GLOB GraphicsHeaders Graphics/Headers/*.h)
-
-FILE(GLOB MiscHeaders misc/Headres/*.h)
-FILE(GLOB MiscSources misc/Sources/*.cpp)
-
-FILE(GLOB ThirdPartyLibs libs/*.h)
-
-set(SOURCE_FILES
-        ${ObjectsSources}
-        ${ObjectsHeaders}
-        ${ThirdParyLibs}
-        ${MiscHeaders}
-        ${MiscSources}
-        ${GraphicsHeadres}
-        ${GraphicsSources})
-
-add_compile_definitions(GLFW_INCLUDE_VULKAN
-        GLM_FORCE_RADIANS
-        GLM_FORCE_DEPTH_ZERO_TO_ONE
-        GLM_ENABLE_EXPERIMENTAL
-        GLM_FORCE_SWIZZLE
-        STB_IMAGE_IMPLEMENTATION
-        TINYOBJLOADER_IMPLEMENTATION
-        VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE)
-
-add_executable(VulkanTest main.cpp ${SOURCE_FILES})
-target_link_libraries(${PROJECT_NAME} ${GLFW_STATIC_LIBRARIES} ${GLM_LIBRARIES} ${Vulkan_LIBRARIES})
-add_executable(VulkanTest2 VulkanTest.cpp ${SOURCE_FILES})
-target_link_libraries(VulkanTest2 ${GLFW_STATIC_LIBRARIES} ${GLM_LIBRARIES} ${Vulkan_LIBRARIES})
+add_executable(VulkanApp main.cpp
+        vulkan/VulkanCore.cpp vulkan/VulkanCore.h
+        window/GlfwWindow.cpp window/GlfwWindow.h)
+target_link_libraries(VulkanApp
+        ${Vulkan_LIBRARIES} glfw spdlog::spdlog imgui::imgui fmt::fmt)
